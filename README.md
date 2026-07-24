@@ -185,6 +185,55 @@ node t = execute actions 1..t,
          infer again immediately before action t+1
 ```
 
+### Forced-replan cadence and off-by-one semantics
+
+A forced replan starts a new chunk and therefore re-anchors the subsequent
+natural `r0` cadence. For `r0=25` and candidate node `t=30`, execution is:
+
+```text
+initial inference -> execute actions 1..25
+natural replan t=25 -> execute actions 26..30
+forced replan t=30 -> discard the old chunk tail and infer before action 31
+new chunk -> execute actions 31..55
+natural replan t=55 -> execute actions 56..80
+natural replan t=80 -> ...
+```
+
+The resulting non-initial replan nodes are:
+
+```text
+25, 30, 55, 80, ...
+```
+
+They are **not** `25, 30, 50, 75, ...`: the implementation does not keep the
+original absolute 25-action grid after the forced intervention.
+
+The node manifest and policy option use different indexing conventions:
+
+```text
+replan_after_actions = t
+force_before_one_based_action = t + 1
+```
+
+For node `t=30`, the paired evaluator therefore records:
+
+```json
+{
+  "replan_after_actions": 30,
+  "force_before_one_based_action": 31
+}
+```
+
+and passes:
+
+```text
+pi05_force_replan_before_actions=[31]
+```
+
+to the policy. Supplying the raw policy option as `[30]` would instead force a
+replan before action 30, which is node `t=29`, producing the cadence
+`25, 29, 54, 79, ...`.
+
 ## Read-only acceptance audit
 
 After the pipeline completes:
