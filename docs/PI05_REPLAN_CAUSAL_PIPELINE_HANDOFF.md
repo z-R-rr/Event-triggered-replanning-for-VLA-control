@@ -16,7 +16,9 @@ All experiments use:
 
 - RoboTwin: `/home/ubuntu/Workspace/RoboTwin`
 - OpenPI: `/home/ubuntu/Workspace/openpi`
-- mixed checkpoint: `/home/ubuntu/Model/pi0.5_robotwin2`
+- mixed checkpoint:
+  [`motus-robotics/pi0.5_robotwin2`](https://huggingface.co/motus-robotics/pi0.5_robotwin2),
+  installed at `/home/ubuntu/Model/pi0.5_robotwin2`
 - OpenPI config: `pi05_robotwin2_multitask_pytorch`
 - task config: `demo_clean`
 - fixed predicted horizon: `H=50`

@@ -19,7 +19,9 @@ For a fixed scene that fails with execution length `r0=25`, the pipeline asks:
 
 The frozen protocol uses:
 
-- checkpoint: `/home/ubuntu/Model/pi0.5_robotwin2`;
+- checkpoint:
+  [`motus-robotics/pi0.5_robotwin2`](https://huggingface.co/motus-robotics/pi0.5_robotwin2),
+  installed at `/home/ubuntu/Model/pi0.5_robotwin2`;
 - predicted horizon: `H=50`;
 - discovery grid: `r={10,15,25,30,35,40}`;
 - 100 fixed scenes, hence 600 discovery episodes;
@@ -105,6 +107,17 @@ according to their upstream documentation. A typical workspace is:
 ```
 
 The mixed checkpoint is not distributed by this repository.
+Download it from the
+[`motus-robotics/pi0.5_robotwin2` Hugging Face repository](https://huggingface.co/motus-robotics/pi0.5_robotwin2)
+and preserve the complete checkpoint directory, including its `assets/`
+subdirectory, at:
+
+```text
+/home/ubuntu/Model/pi0.5_robotwin2
+```
+
+The published model card identifies it as a PyTorch-converted pi0.5
+checkpoint fine-tuned in the RoboTwin 2.0 simulation environment.
 
 ### 2. Clone this repository
 
