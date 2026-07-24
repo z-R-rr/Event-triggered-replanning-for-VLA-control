@@ -1,0 +1,235 @@
+# Event-triggered replanning for VLA control
+
+This repository is a compact, code-only overlay for the deterministic pi0.5
+RoboTwin one-replan causal evaluation pipeline. It contains the runtime hooks,
+candidate-node construction, shared-control paired evaluation, integrity audit,
+and scene-outcome visualization used in the validated
+`move_playingcard_away` experiment.
+
+It intentionally does **not** contain RoboTwin/OpenPI source trees, model
+weights, evaluation results, videos, logs, or W&B artifacts.
+
+## What the pipeline measures
+
+For a fixed scene that fails with execution length `r0=25`, the pipeline asks:
+
+> Can exactly one extra inference at a selected action boundary rescue the
+> episode, while keeping the scene, prompt, random seed, observation, and
+> pre-intervention action prefix identical to a shared control?
+
+The frozen protocol uses:
+
+- checkpoint: `/home/ubuntu/Model/pi0.5_robotwin2`;
+- predicted horizon: `H=50`;
+- discovery grid: `r={10,15,25,30,35,40}`;
+- 100 fixed scenes, hence 600 discovery episodes;
+- deterministic Torch from discovery onward;
+- fixed `r0=25`;
+- at most three candidate-window families and ten nodes per scene;
+- a 3-control/3-forced reproducibility smoke before full evaluation;
+- one shared deterministic control per scene plus one forced run per node.
+
+The full rationale and exact commands are in:
+
+- [`docs/PI05_REPLAN_CAUSAL_PIPELINE_HANDOFF.md`](docs/PI05_REPLAN_CAUSAL_PIPELINE_HANDOFF.md)
+- [`docs/PI05_REPLAN_PIPELINE_RUNBOOK.md`](docs/PI05_REPLAN_PIPELINE_RUNBOOK.md)
+
+## Repository layout
+
+```text
+.
+├── robotwin/                  # overlay onto a RoboTwin checkout
+│   ├── envs/
+│   ├── policy/
+│   └── script/
+├── openpi/                    # overlay onto an OpenPI checkout
+│   ├── scripts/
+│   └── src/openpi/training/
+├── docs/
+└── LICENSES/
+```
+
+### RoboTwin runtime files
+
+| File | Purpose |
+|---|---|
+| `robotwin/envs/_base_task.py` | Deterministic scene/prompt plumbing and trace-compatible task execution hooks |
+| `robotwin/policy/pi05_remote.py` | Remote pi0.5 client, compact action/chunk traces, prompt fingerprints, observation recording, occurrence tokens, and forced replan semantics |
+| `robotwin/policy/pi05/deploy_policy.yml` | pi0.5 remote-policy deployment options |
+| `robotwin/script/eval_policy_wandb.py` | Fixed seed manifest, resolved prompt plaintext, and evaluation entry point |
+| `robotwin/script/grid_search_pi05_hr.py` | Deterministic six-r discovery launcher and resumable grid collection |
+
+### Candidate selection and paired evaluation
+
+| File | Purpose |
+|---|---|
+| `recover_pi05_prompt_manifest.py` | Independently recover prompt plaintext and verify its SHA-256 fingerprint |
+| `make_pi05_outcome_subset_manifest.py` | Select exactly the `r0`-fail/other-r-success contrast scenes |
+| `build_pi05_replan_window_controls.py` | Map successful-r replan boundaries into the failed-r0 trajectory using five-action, 12-D arm-joint state proxies |
+| `extract_pi05_replan_nodes.py` | Rank, deduplicate, and cap concrete intervention nodes |
+| `run_pi05_paired_replan_smoke.py` | Run three exact control and three exact forced repeats and enforce reproducibility gates |
+| `run_pi05_paired_replan_node_eval.py` | Run one shared control per scene plus all forced-node treatments |
+| `make_pi05_round2_no_rescue_nodes.py` | Optional outcome-adaptive second node round for first-round no-rescue scenes |
+| `plot_pi05_scene_outcomes.py` | Render per-scene grid outcomes and the r25-plus-one-replan row |
+| `audit_pi05_replan_pipeline.py` | Read-only end-to-end integrity audit |
+
+All paths in the table above are under `robotwin/script/` unless otherwise
+shown.
+
+### OpenPI server files
+
+| File | Purpose |
+|---|---|
+| `openpi/scripts/serve_robotwin_policy.py` | Episode-seeded inference, occurrence-token reset, isolated shadow RNG, and deterministic Torch kernel mode |
+| `openpi/src/openpi/training/config.py` | `pi05_robotwin2_multitask_pytorch` model/data transform configuration |
+
+These server-side files are required. Installing only the RoboTwin overlay is
+not sufficient for causal prefix reproducibility.
+
+## Installation
+
+### 1. Prepare the upstream checkouts
+
+The overlay was validated against:
+
+- RoboTwin commit `c3ddfa8`;
+- OpenPI commit `729ac3ecb66f4685f62ab72d77d54d136eaef6fb`.
+
+Install RoboTwin, OpenPI, CUDA, SAPIEN/CuRobo, and their Python environments
+according to their upstream documentation. A typical workspace is:
+
+```text
+/home/ubuntu/Workspace/RoboTwin
+/home/ubuntu/Workspace/openpi
+/home/ubuntu/Model/pi0.5_robotwin2
+```
+
+The mixed checkpoint is not distributed by this repository.
+
+### 2. Clone this repository
+
+```bash
+cd /home/ubuntu/Workspace
+git clone git@github.com:z-R-rr/Event-triggered-replanning-for-VLA-control.git
+cd Event-triggered-replanning-for-VLA-control
+```
+
+### 3. Inspect and apply the overlays
+
+Set task-specific paths rather than modifying shell-wide variables:
+
+```bash
+ROBOTWIN_CHECKOUT=/home/ubuntu/Workspace/RoboTwin
+OPENPI_CHECKOUT=/home/ubuntu/Workspace/openpi
+```
+
+Preview the exact files that will be replaced:
+
+```bash
+rsync -avni robotwin/ "${ROBOTWIN_CHECKOUT}/"
+rsync -avni openpi/ "${OPENPI_CHECKOUT}/"
+```
+
+Apply the overlay only from clean or intentionally backed-up checkouts:
+
+```bash
+rsync -av robotwin/ "${ROBOTWIN_CHECKOUT}/"
+rsync -av openpi/ "${OPENPI_CHECKOUT}/"
+```
+
+Then inspect both source trees:
+
+```bash
+git -C "${ROBOTWIN_CHECKOUT}" diff --stat
+git -C "${OPENPI_CHECKOUT}" diff --stat
+```
+
+No additional Python package is introduced by this overlay. Use the existing
+RoboTwin `.venv` and OpenPI environment created by their upstream installation
+procedures.
+
+## Running the pipeline
+
+Use the complete command sequence in the
+[pipeline runbook](docs/PI05_REPLAN_PIPELINE_RUNBOOK.md). The stage order is:
+
+1. inspect the task implementation and freeze a new result directory;
+2. run the deterministic 600-episode six-r discovery grid;
+3. audit fixed seeds, prompt plaintext, and fingerprints;
+4. select r25-fail/other-r-success scenes;
+5. generate mapped candidate windows and at most ten nodes per scene;
+6. pass the 3+3 paired reproducibility smoke;
+7. prepare and inspect the shared-control experiment plan;
+8. run the resumable paired evaluation;
+9. optionally run a separately reported second node round;
+10. generate and audit `scene_outcomes`.
+
+The intervention definition is exact:
+
+```text
+node t = execute actions 1..t,
+         discard the remaining old chunk,
+         infer again immediately before action t+1
+```
+
+## Read-only acceptance audit
+
+After the pipeline completes:
+
+```bash
+cd /home/ubuntu/Workspace/RoboTwin
+
+python3 script/audit_pi05_replan_pipeline.py \
+  --root /absolute/path/to/the/task/run
+```
+
+Pass every paired round explicitly when a run has multiple rounds:
+
+```bash
+python3 script/audit_pi05_replan_pipeline.py \
+  --root "$RUN_ROOT" \
+  --paired-summary "$RUN_ROOT/paired_replan_node_eval_r25_deterministic/paired_summary.json" \
+  --paired-summary "$RUN_ROOT/paired_replan_node_eval_r25_round2_no_rescue_5each_deterministic/paired_summary.json"
+```
+
+The audit launches no GPU process and writes nothing into the result
+directory. It checks all six trace sets, ordered seeds, prompt plaintext and
+fingerprints, deterministic server logs, candidate caps, paired validity, and
+the final scene-level success count.
+
+## Validated minimal experiment
+
+For `move_playingcard_away`:
+
+- discovery: 600 episodes;
+- r25 baseline: 73/100;
+- contrast scenes: 22;
+- primary candidate nodes: 129;
+- reproducibility smoke: 6 episodes;
+- primary paired evaluation: 22 controls + 129 forced;
+- optional second round: 11 controls + 55 forced;
+- distinct rescued scenes across both rounds: 14;
+- final r25 plus one-replan outcome: 87/100.
+
+Node-level rescue counts must not be added directly to the scene-level success
+rate. A scene with several successful rescue nodes contributes only one final
+success.
+
+## Reproducibility and scope
+
+This is an exploratory, label-assisted causal evaluation pipeline, not a
+label-free online event trigger. Candidate scenes and nodes use discovery-grid
+outcomes. Final task success is used only to validate paired interventions.
+
+Do not:
+
+- switch deterministic mode between discovery and paired evaluation;
+- substitute unstable seeds or prompt plaintext;
+- use forced-only runs as causal evidence;
+- mix second-round adaptive nodes into the preregistered primary result;
+- overwrite an existing result directory.
+
+## Licenses
+
+The overlay contains files derived from both RoboTwin and OpenPI. Their
+respective license texts are preserved under [`LICENSES/`](LICENSES/).

@@ -1,0 +1,17 @@
+# Basic experiment configuration (keep unchanged)
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# Add Parameters You Need
+train_config_name: null
+model_name: null
+checkpoint_id: 30000
+pi0_step: 50
+pi05_dynamic_r: false
+pi05_dynamic_r_candidates: []
+pi05_dynamic_r_calibration: null
+pi05_dynamic_r_threshold: 0.75
