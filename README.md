@@ -71,7 +71,10 @@ The full rationale and exact commands are in:
 | `extract_pi05_replan_nodes.py` | Rank, deduplicate, and cap concrete intervention nodes |
 | `run_pi05_paired_replan_smoke.py` | Run three exact control and three exact forced repeats and enforce reproducibility gates |
 | `run_pi05_paired_replan_node_eval.py` | Run one shared control per scene plus all forced-node treatments |
+| `run_pi05_paired_replan_smoke_absolute_cadence.py` | Absolute-cadence 3+3 smoke entry point; enables the extra cadence validity gates |
+| `run_pi05_paired_replan_node_eval_absolute_cadence.py` | Absolute-cadence shared-control paired-evaluation entry point |
 | `make_pi05_round2_no_rescue_nodes.py` | Optional outcome-adaptive second node round for first-round no-rescue scenes |
+| `merge_pi05_replan_node_manifests.py` | Build an immutable, provenance-preserving union of candidate nodes from multiple rounds |
 | `plot_pi05_scene_outcomes.py` | Render per-scene grid outcomes and the r25-plus-one-replan row |
 | `audit_pi05_replan_pipeline.py` | Read-only end-to-end integrity audit |
 
@@ -185,10 +188,15 @@ node t = execute actions 1..t,
          infer again immediately before action t+1
 ```
 
-### Forced-replan cadence and off-by-one semantics
+### Forced-replan cadence modes and off-by-one semantics
 
-A forced replan starts a new chunk and therefore re-anchors the subsequent
-natural `r0` cadence. For `r0=25` and candidate node `t=30`, execution is:
+The runtime supports two explicit cadence modes. The default remains the
+original re-anchored behavior so existing experiments do not silently change.
+
+#### Re-anchored cadence (default)
+
+A forced replan starts a fresh full-length chunk and re-anchors subsequent
+natural `r0` boundaries. For `r0=25` and candidate node `t=30`:
 
 ```text
 initial inference -> execute actions 1..25
@@ -205,8 +213,50 @@ The resulting non-initial replan nodes are:
 25, 30, 55, 80, ...
 ```
 
-They are **not** `25, 30, 50, 75, ...`: the implementation does not keep the
-original absolute 25-action grid after the forced intervention.
+This is selected by the base scripts with
+`pi05_absolute_r0_cadence=false`.
+
+#### Absolute `r0` cadence (opt-in)
+
+The forced replacement chunk is truncated at the next original absolute
+`r0` boundary. Natural replans therefore remain anchored at
+`r0, 2*r0, 3*r0, ...`. For the same `r0=25`, `t=30` intervention:
+
+```text
+initial inference -> execute actions 1..25
+natural replan t=25 -> execute actions 26..30
+forced replan t=30 -> discard the old chunk tail and infer before action 31
+replacement chunk -> execute actions 31..50 (20 actions)
+natural replan t=50 -> execute actions 51..75
+natural replan t=75 -> ...
+```
+
+The resulting non-initial replan nodes are:
+
+```text
+25, 30, 50, 75, ...
+```
+
+Use the clearly named entry points:
+
+```bash
+python3 script/run_pi05_paired_replan_smoke_absolute_cadence.py [same smoke arguments]
+python3 script/run_pi05_paired_replan_node_eval_absolute_cadence.py [same eval arguments]
+```
+
+They append `--absolute-r0-cadence`, which passes
+`pi05_absolute_r0_cadence=true` to the policy. The generic smoke and evaluator
+also accept that flag directly. Absolute cadence is rejected when dynamic-r is
+enabled because the two execution schedules are not jointly defined.
+
+The absolute-cadence smoke and evaluator additionally require every forced
+replacement to execute exactly:
+
+```text
+r0 - (t mod r0)
+```
+
+actions and to terminate at the next absolute multiple of `r0`.
 
 The node manifest and policy option use different indexing conventions:
 
@@ -231,8 +281,24 @@ pi05_force_replan_before_actions=[31]
 ```
 
 to the policy. Supplying the raw policy option as `[30]` would instead force a
-replan before action 30, which is node `t=29`, producing the cadence
-`25, 29, 54, 79, ...`.
+replan before action 30, which is node `t=29`. Its re-anchored cadence would be
+`25, 29, 54, 79, ...`; its absolute cadence would be
+`25, 29, 50, 75, ...`.
+
+### Merging candidate rounds for a cadence comparison
+
+To evaluate exactly the union of first- and second-round nodes without
+overwriting either source manifest:
+
+```bash
+python3 script/merge_pi05_replan_node_manifests.py \
+  --input /path/to/primary_nodes.json \
+  --input /path/to/round2_nodes.json \
+  --output /new/path/to/union_nodes.json
+```
+
+The merger verifies a single `r0` per scene, deduplicates nodes, records
+per-node source provenance, and refuses to overwrite an incompatible output.
 
 ## Read-only acceptance audit
 
@@ -261,7 +327,7 @@ the final scene-level success count.
 
 ## Validated minimal experiment
 
-For `move_playingcard_away`:
+For `move_playingcard_away`, using the default re-anchored cadence:
 
 - discovery: 600 episodes;
 - r25 baseline: 73/100;
@@ -276,6 +342,26 @@ For `move_playingcard_away`:
 Node-level rescue counts must not be added directly to the scene-level success
 rate. A scene with several successful rescue nodes contributes only one final
 success.
+
+### Validated absolute-cadence comparison
+
+The opt-in `25/30/50/75` implementation was separately validated on the union
+of both candidate rounds:
+
+- merged manifest: 22 scenes, 184 unique nodes (`129 + 55`, no overlap);
+- strict reproducibility smoke: 3 controls + 3 forced, all gates passed;
+- formal evaluation: 22 shared controls + 184 forced treatments;
+- total new execution including smoke: 212 episodes;
+- valid causal pairs: 184/184;
+- node-level rescues: 56/184 (30.43%);
+- scenes with at least one rescue node: 16/22;
+- oracle scene-level result: `73 + 16 = 89/100`.
+
+The 89% value assumes choosing a node already shown to rescue each scene; it
+is not the accuracy of a label-free online trigger. Cadence changes the entire
+post-intervention trajectory: relative to the two default-cadence rounds, the
+absolute mode gained six rescued scenes and lost four rather than being a
+strict superset.
 
 ## Reproducibility and scope
 

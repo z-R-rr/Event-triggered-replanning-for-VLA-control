@@ -16,10 +16,32 @@ import numpy as np
 from openpi_client import websocket_client_policy
 
 
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+        raise ValueError(f"Unsupported boolean value: {value!r}")
+    return bool(value)
+
+
 class RemotePiPolicy:
-    def __init__(self, host: str, port: int, pi0_step: int, intervention: str = "none", pause_steps: int = 0, force_replan_before_actions=None,
-                 dynamic_r: bool = False, dynamic_r_candidates=None, dynamic_r_calibration: str | None = None,
-                 dynamic_r_threshold: float = 0.75):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        pi0_step: int,
+        intervention: str = "none",
+        pause_steps: int = 0,
+        force_replan_before_actions=None,
+        dynamic_r: bool = False,
+        dynamic_r_candidates=None,
+        dynamic_r_calibration: str | None = None,
+        dynamic_r_threshold: float = 0.75,
+        absolute_r0_cadence: bool = False,
+    ):
         self.client = websocket_client_policy.WebsocketClientPolicy(host=host, port=port)
         self.pi0_step = pi0_step
         self.instruction = None
@@ -44,6 +66,10 @@ class RemotePiPolicy:
         # It is never enabled in ordinary evaluations.
         self.force_replan_before_actions = {int(value) for value in (force_replan_before_actions or [])}
         self._forced_replan_before_actions_seen = set()
+        # Default False preserves the validated behavior in which a forced
+        # replan starts a fresh full-r chunk. True inserts one forced replan
+        # while keeping later natural boundaries anchored at r0, 2*r0, ...
+        self.absolute_r0_cadence = _as_bool(absolute_r0_cadence)
         self.dynamic_r = bool(dynamic_r)
         self.dynamic_r_candidates = sorted({int(value) for value in (dynamic_r_candidates or [pi0_step])})
         if self.pi0_step not in self.dynamic_r_candidates:
@@ -144,6 +170,7 @@ def get_model(usr_args):
         dynamic_r_candidates=usr_args.get("pi05_dynamic_r_candidates", []),
         dynamic_r_calibration=usr_args.get("pi05_dynamic_r_calibration"),
         dynamic_r_threshold=float(usr_args.get("pi05_dynamic_r_threshold", 0.75)),
+        absolute_r0_cadence=usr_args.get("pi05_absolute_r0_cadence", False),
     )
     model.initial_pi0_step = model.pi0_step
     return model
@@ -151,6 +178,17 @@ def get_model(usr_args):
 
 def _phase(task_env):
     return task_env.get_policy_phase() if hasattr(task_env, "get_policy_phase") else "unknown"
+
+
+def _execution_limit(model, completed_actions: int) -> int:
+    """Actions to execute before the next natural absolute-r0 boundary."""
+    if not model.absolute_r0_cadence:
+        return int(model.pi0_step)
+    if model.dynamic_r:
+        raise ValueError("absolute r0 cadence is incompatible with dynamic r")
+    cadence_r = int(model.initial_pi0_step)
+    offset = int(completed_actions) % cadence_r
+    return cadence_r if offset == 0 else cadence_r - offset
 
 
 def _observation_fingerprint(observation):
@@ -436,6 +474,7 @@ def eval(task_env, model, observation):
         if boundary_probe is not None:
             model.chunk_traces[-1]["csl_probes"].append(boundary_probe)
     dynamic_r_decision = _dynamic_r_decision(model) if model.dynamic_r else None
+    execution_limit = _execution_limit(model, task_env.take_action_cnt)
     if getattr(model, "trace_enabled", False):
         model.chunk_traces.append({
             "inference_call": model.inference_calls,
@@ -454,11 +493,17 @@ def eval(task_env, model, observation):
             "boundary_cartesian_delta": None,
             "chunk_actions": actions.tolist(),
             "dynamic_r_decision": dynamic_r_decision,
-            "executed_r": int(model.pi0_step),
+            "executed_r": execution_limit,
+            "absolute_r0_cadence": bool(model.absolute_r0_cadence),
+            "absolute_r0_next_boundary": (
+                int(task_env.take_action_cnt) + execution_limit
+                if model.absolute_r0_cadence
+                else None
+            ),
         })
     model.previous_chunk = actions.copy()
     model.previous_chunk_cursor = 0
-    for action_index, action in enumerate(actions[: model.pi0_step]):
+    for action_index, action in enumerate(actions[:execution_limit]):
         next_global_action = int(task_env.take_action_cnt) + 1
         if (
             next_global_action in model.force_replan_before_actions

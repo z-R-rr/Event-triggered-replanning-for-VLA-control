@@ -137,7 +137,15 @@ def normalized_trace(trace: dict) -> dict:
     return _canonicalize_unordered_contact_pairs(normalized)
 
 
-def arm_report(case_dir: Path, repeats: int, node: int, forced: bool) -> dict:
+def arm_report(
+    case_dir: Path,
+    repeats: int,
+    node: int,
+    forced: bool,
+    *,
+    r0: int = 25,
+    absolute_r0_cadence: bool = False,
+) -> dict:
     traces = []
     rows = []
     for path in trace_paths(case_dir, repeats):
@@ -166,10 +174,20 @@ def arm_report(case_dir: Path, repeats: int, node: int, forced: bool) -> dict:
             None,
         )
         replacement_fingerprint = None
+        replacement_execution_limit = None
+        replacement_next_boundary = None
         if forced_replan_chunk is not None and forced_replan_chunk + 1 < len(trace["chunks"]):
-            replacement_fingerprint = trace["chunks"][forced_replan_chunk + 1].get(
-                "observation_fingerprint"
+            replacement_chunk = trace["chunks"][forced_replan_chunk + 1]
+            replacement_fingerprint = replacement_chunk.get("observation_fingerprint")
+            replacement_execution_limit = replacement_chunk.get("executed_r")
+            replacement_next_boundary = replacement_chunk.get(
+                "absolute_r0_next_boundary"
             )
+        chunk_starts = [0]
+        action_clock = 0
+        for chunk in trace["chunks"][1:]:
+            action_clock += int(chunk["previous_chunk_cursor"])
+            chunk_starts.append(action_clock)
         rows.append(
             {
                 "episode_id": episode_id,
@@ -187,6 +205,13 @@ def arm_report(case_dir: Path, repeats: int, node: int, forced: bool) -> dict:
                 "normalized_trace_sha256": sha256_json(normalized_trace(trace)),
                 "forced_replan_before_actions": markers,
                 "replacement_observation_fingerprint": replacement_fingerprint,
+                "replacement_execution_limit": replacement_execution_limit,
+                "replacement_next_boundary": replacement_next_boundary,
+                "all_chunks_absolute_r0_cadence": all(
+                    chunk.get("absolute_r0_cadence") is True
+                    for chunk in trace["chunks"]
+                ),
+                "chunk_start_actions": chunk_starts,
             }
         )
         traces.append(trace)
@@ -202,6 +227,10 @@ def arm_report(case_dir: Path, repeats: int, node: int, forced: bool) -> dict:
         "normalized_trace_sha256",
         "forced_replan_before_actions",
         "replacement_observation_fingerprint",
+        "replacement_execution_limit",
+        "replacement_next_boundary",
+        "all_chunks_absolute_r0_cadence",
+        "chunk_start_actions",
     )
     checks = {
         f"{field}_identical": len(
@@ -220,6 +249,25 @@ def arm_report(case_dir: Path, repeats: int, node: int, forced: bool) -> dict:
             == row["node_observation_fingerprint"]
             for row in rows
         )
+    if absolute_r0_cadence:
+        checks["absolute_r0_cadence_enabled"] = all(
+            row["all_chunks_absolute_r0_cadence"] for row in rows
+        )
+        checks["absolute_replan_boundaries"] = all(
+            all(
+                start == node or start % r0 == 0
+                for start in row["chunk_start_actions"]
+            )
+            for row in rows
+        )
+        if forced:
+            expected_limit = r0 - node % r0
+            checks["replacement_ends_at_next_absolute_boundary"] = all(
+                row["replacement_execution_limit"] == expected_limit
+                and row["replacement_next_boundary"] == node + expected_limit
+                and (node + expected_limit) % r0 == 0
+                for row in rows
+            )
     return {
         "arm": "forced" if forced else "control",
         "repeats": repeats,
@@ -230,10 +278,29 @@ def arm_report(case_dir: Path, repeats: int, node: int, forced: bool) -> dict:
 
 
 def analyze(
-    output_dir: Path, repeats: int, scene_seed: int, node: int, r0: int = 25
+    output_dir: Path,
+    repeats: int,
+    scene_seed: int,
+    node: int,
+    r0: int = 25,
+    absolute_r0_cadence: bool = False,
 ) -> dict:
-    control = arm_report(output_dir / "control", repeats, node, forced=False)
-    forced = arm_report(output_dir / "forced", repeats, node, forced=True)
+    control = arm_report(
+        output_dir / "control",
+        repeats,
+        node,
+        forced=False,
+        r0=r0,
+        absolute_r0_cadence=absolute_r0_cadence,
+    )
+    forced = arm_report(
+        output_dir / "forced",
+        repeats,
+        node,
+        forced=True,
+        r0=r0,
+        absolute_r0_cadence=absolute_r0_cadence,
+    )
     all_rows = control["runs"] + forced["runs"]
     cross_arm_checks = {
         "same_scene_seed": all(
@@ -260,6 +327,7 @@ def analyze(
         "r0": r0,
         "replan_after_actions": node,
         "force_before_one_based_action": node + 1,
+        "absolute_r0_cadence": bool(absolute_r0_cadence),
         "repeats_per_arm": repeats,
         "determinism_contract": {
             "server": "torch deterministic algorithms; cuDNN deterministic; TF32 disabled",
@@ -340,6 +408,8 @@ def make_eval_command(
         "none",
         "--pi05_force_replan_before_actions",
         repr(force_actions),
+        "--pi05_absolute_r0_cadence",
+        repr(bool(args.absolute_r0_cadence)),
     ]
 
 
@@ -364,6 +434,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--wandb-mode", choices=("offline", "online", "disabled"), default="disabled"
+    )
+    parser.add_argument(
+        "--absolute-r0-cadence",
+        action="store_true",
+        help=(
+            "Insert the forced replan while keeping later natural boundaries "
+            "anchored at r0, 2*r0, ..."
+        ),
     )
     args = parser.parse_args()
 
@@ -401,6 +479,7 @@ def main() -> None:
         "forced": f"discard old tail and infer before action {args.node + 1}",
         "repeats_per_arm": args.repeats,
         "deterministic_torch": True,
+        "absolute_r0_cadence": bool(args.absolute_r0_cadence),
         "inference_seed": args.seed,
     }
     write_immutable(args.output_dir / "protocol.json", protocol)
@@ -433,7 +512,12 @@ def main() -> None:
     report_path = args.output_dir / "reproducibility_report.json"
     if all((args.output_dir / arm / "metrics.json").exists() for arm in ("control", "forced")):
         report = analyze(
-            args.output_dir, args.repeats, args.scene_seed, args.node, args.r0
+            args.output_dir,
+            args.repeats,
+            args.scene_seed,
+            args.node,
+            args.r0,
+            args.absolute_r0_cadence,
         )
         report_path.write_text(json.dumps(report, indent=2) + "\n")
         print(report_path)
@@ -505,7 +589,12 @@ def main() -> None:
             stop_process_group(server)
 
     report = analyze(
-        args.output_dir, args.repeats, args.scene_seed, args.node, args.r0
+        args.output_dir,
+        args.repeats,
+        args.scene_seed,
+        args.node,
+        args.r0,
+        args.absolute_r0_cadence,
     )
     report_path.write_text(json.dumps(report, indent=2) + "\n")
     print(report_path)

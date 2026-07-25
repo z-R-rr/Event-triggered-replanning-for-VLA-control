@@ -214,6 +214,28 @@ def final_summary(plan: dict) -> dict:
                     control_trace["instruction"] == forced_trace["instruction"]
                 ),
             }
+            if plan.get("absolute_r0_cadence"):
+                replacement_chunk = (
+                    forced_trace["chunks"][marker_chunk_index + 1]
+                    if marker_chunk_index is not None
+                    and marker_chunk_index + 1 < len(forced_trace["chunks"])
+                    else None
+                )
+                expected_limit = int(plan["r0"]) - node % int(plan["r0"])
+                checks["absolute_r0_cadence_enabled"] = (
+                    replacement_chunk is not None
+                    and replacement_chunk.get("absolute_r0_cadence") is True
+                )
+                checks["replacement_ends_at_next_absolute_boundary"] = (
+                    replacement_chunk is not None
+                    and int(replacement_chunk.get("executed_r", -1))
+                    == expected_limit
+                    and int(
+                        replacement_chunk.get("absolute_r0_next_boundary", -1)
+                    )
+                    == node + expected_limit
+                    and (node + expected_limit) % int(plan["r0"]) == 0
+                )
             control_success = bool(
                 control_trace["episode_metrics"]["episode_success"]
             )
@@ -302,6 +324,7 @@ def final_summary(plan: dict) -> dict:
             "forced_node_trials": len(plan["forced"]),
             "total_trials": len(plan["controls"]) + len(plan["forced"]),
             "server_deterministic_torch": True,
+            "absolute_r0_cadence": bool(plan.get("absolute_r0_cadence", False)),
             "control": "one unmodified r0 trajectory per scene",
             "treatment": "discard old chunk tail after action t and infer before action t+1",
             "validity_gate": (
@@ -392,6 +415,7 @@ def prepare_plan(args: argparse.Namespace) -> dict:
         "r0": args.r0,
         "inference_seed": args.seed,
         "deterministic_torch": True,
+        "absolute_r0_cadence": bool(args.absolute_r0_cadence),
         "source_nodes": str(args.nodes),
         "source_seed_manifest": str(args.seed_manifest),
         "source_resolved_manifest": str(args.resolved_manifest),
@@ -498,6 +522,8 @@ def eval_command(args: argparse.Namespace, case: dict) -> list[str]:
         "none",
         "--pi05_force_replan_before_actions",
         repr(forced_actions),
+        "--pi05_absolute_r0_cadence",
+        repr(bool(args.absolute_r0_cadence)),
     ]
     return command
 
@@ -526,6 +552,14 @@ def main() -> None:
         "--prepare-only",
         action="store_true",
         help="Write and validate the task-specific plan without launching GPUs.",
+    )
+    parser.add_argument(
+        "--absolute-r0-cadence",
+        action="store_true",
+        help=(
+            "Insert the forced replan while keeping later natural boundaries "
+            "anchored at r0, 2*r0, ... instead of starting a fresh full-r chunk."
+        ),
     )
     args = parser.parse_args()
 
