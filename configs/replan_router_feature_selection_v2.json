@@ -1,0 +1,177 @@
+{
+  "schema_version": 2,
+  "pipeline_id": "move_playingcard_away_input_feature_selection_v2",
+  "status": "active",
+  "objective": "Select router input features using one common offline cohort and one common balanced online cohort.",
+  "task": {
+    "name": "move_playingcard_away",
+    "config": "demo_clean",
+    "horizon": 50,
+    "action_dim": 14,
+    "natural_replan_interval": 25
+  },
+  "offline": {
+    "data_roots": [
+      "temp/outputs/move_playingcard_away_r25_initial_success_top4_absolute/eval_absolute_path_shard_0",
+      "temp/outputs/move_playingcard_away_r25_initial_success_top4_absolute/eval_absolute_path_shard_1",
+      "../RoboTwin/eval_result/move_playingcard_away/pi05_remote/hr_eval100_pi05_robotwin2_deterministic_seed0_repl01/paired_replan_node_eval_r25_absolute_cadence_round1_round2_union_deterministic"
+    ],
+    "dataset_fingerprint": "36331e044e893489234cdff001ce4dd2d8c42ccd6c345bcfb873dabb8635f400",
+    "scene_count": 89,
+    "sample_count": 348,
+    "transition_counts": {
+      "rescue": 56,
+      "harm": 16,
+      "both_success": 276
+    },
+    "both_failure_excluded": true,
+    "feature_configs": [
+      "V0",
+      "V1",
+      "V2",
+      "V3",
+      "V5",
+      "E1",
+      "E2"
+    ],
+    "excluded_noncomparable_configs": {
+      "V4": "Missing t-k history changes the 348-sample cohort.",
+      "V6": "Missing t-k history changes the 348-sample cohort.",
+      "V7": "Missing t-k history changes the 348-sample cohort.",
+      "C3": "Full-chunk diagnostic is outside the prescribed candidate set."
+    },
+    "oof_protocol": {
+      "folds": 5,
+      "scene_grouped": true,
+      "stratified_by_scene_transition": true,
+      "split_seed": 0,
+      "inner_validation_scene_fraction": 0.15,
+      "fold_identity_sha256": "070082affc633d3776a2ff2bb0bcfb9bf9fad3851f395ad6e541799ac0b1e226",
+      "each_sample_predicted_out_of_fold_once": true
+    },
+    "final_checkpoint_training": {
+      "samples": 348,
+      "transition_counts": {
+        "rescue": 56,
+        "harm": 16,
+        "both_success": 276
+      },
+      "epoch_rule": "rounded median of the five OOF-fold best epochs",
+      "normalization_fit": "all 348 samples"
+    },
+    "training": {
+      "vision_encoder_frozen": true,
+      "router": "existing two-logit MLP",
+      "loss": "unweighted BCEWithLogits over keep/replan outcome heads",
+      "optimizer": "AdamW",
+      "learning_rate": 0.001,
+      "weight_decay": 0.0001,
+      "batch_size": 32,
+      "max_epochs": 200,
+      "early_stopping_patience": 30,
+      "train_seed": 0,
+      "lambda": 0.05,
+      "temporal_k": 5,
+      "eef_waypoints": 5,
+      "gripper_indices": "6,13"
+    },
+    "result_1_metrics": [
+      "trainable_parameters",
+      "oof_roc_auc",
+      "oof_accuracy",
+      "oof_f1",
+      "oof_strong_replan_recall",
+      "oof_false_trigger_rate",
+      "oof_precision_replan"
+    ]
+  },
+  "online": {
+    "cohort": {
+      "scene_count": 40,
+      "confirmed_control_failure_count": 20,
+      "confirmed_control_success_count": 20,
+      "offline_train_unseen": true,
+      "selection_rule": "Within each confirmed control-outcome stratum, sort by scene seed and take the first 20.",
+      "cohort_identity_sha256": "04e17993cd91581c328c70a4fd27e14a7f0c1e6ea22e6330a3420f3e17dd6cab",
+      "seed_manifest": "temp/outputs/replan_router_feature_selection_v2/online/inputs/balanced_seed_manifest.json",
+      "seed_manifest_sha256": "63f919e426a1aa4900800ab932ada05c44c05e95046c60ec914cd3c773167d7f",
+      "resolved_manifest": "temp/outputs/replan_router_feature_selection_v2/online/inputs/balanced_resolved_episode_manifest.json",
+      "resolved_manifest_sha256": "2151ae5c73efdbfb1ed590bf08ed2ded75d77668645012948c2fac4bdcf3c90b",
+      "audit_manifest": "temp/outputs/replan_router_feature_selection_v2/online/inputs/balanced_control_cohort_audit.json",
+      "audit_manifest_sha256": "568532eaae1ec772c57163c44c6d019e7461b0d16125a879bb926bc3c88bfa88",
+      "control_sources": [
+        {
+          "summary": "temp/outputs/move_playingcard_away_online_router_unseen100/eval_max3_interval25/online_router_summary.json",
+          "summary_sha256": "eb0e7a1a08c5456c197bffb48cfa8373d8a0e79382fabee89352d8e369808128",
+          "resolved_manifest": "temp/outputs/move_playingcard_away_online_router_unseen100/inputs/unseen_resolved_episode_manifest.json",
+          "resolved_manifest_sha256": "22222cc0a4907f367e2610a4d7ddc326a173cf9355a6728722f993d2b340a85b"
+        },
+        {
+          "summary": "temp/outputs/move_playingcard_away_online_router_feature_candidates20/eval_interval5_max1/online_feature_candidates_summary.json",
+          "summary_sha256": "32f39957235f109cc70d30b00413781ffbd2d665dc8220962d4f24c97b7ce383",
+          "resolved_manifest": "temp/outputs/move_playingcard_away_online_router_feature_candidates20/inputs/unseen_resolved_episode_manifest.json",
+          "resolved_manifest_sha256": "78a3390530561fa6cdf9dfda226b0956b3db2633fb4aad4a4d863fea57406c64"
+        }
+      ]
+    },
+    "protocol": {
+      "query_interval": 5,
+      "query_max_action": 398,
+      "max_replans": 1,
+      "lambda": 0.05,
+      "absolute_r0_cadence": true,
+      "policy_seed": 0,
+      "gpus": "0,1,2,3",
+      "port_base": 8400
+    },
+    "batches": [
+      {
+        "name": "batch_0",
+        "run_control": true,
+        "features": [
+          "V0",
+          "V1",
+          "V2"
+        ]
+      },
+      {
+        "name": "batch_1",
+        "reuse_control_from": "batch_0",
+        "features": [
+          "V3",
+          "V5",
+          "E1",
+          "E2"
+        ]
+      }
+    ],
+    "result_2_metrics": [
+      "valid_pairs",
+      "control_outcome_match_rate",
+      "control_failure_router_success_rate",
+      "control_failure_rescues",
+      "control_success_router_success_rate",
+      "control_success_harms",
+      "overall_router_success_rate",
+      "trigger_rate"
+    ]
+  },
+  "artifacts": {
+    "output_root": "temp/outputs/replan_router_feature_selection_v2",
+    "source_dataset_manifest": "temp/outputs/replan_router_feature_ablation/configs/dataset_manifest.json",
+    "source_dataset_manifest_sha256": "78a1b0b5fd2cb66d54b31306df505a22e1a2619495f7456d652f2aa07cdff5ca",
+    "base_feature_archive": "temp/outputs/replan_router_minimal_validation/features_vision_encoder.npz",
+    "base_feature_archive_sha256": "4150b1092f36dff40c6c00c15b2d5f154c1caa009e0d2e1a787ce753fbbef071",
+    "base_feature_manifest": "temp/outputs/replan_router_minimal_validation/features_vision_encoder_manifest.json",
+    "base_feature_manifest_sha256": "2d7bf1488e3a613b7d35d2550a1367aa6c9e44570110ba06724a059e17daa806",
+    "prepared_oof_manifest": "temp/outputs/replan_router_feature_selection_v2/offline/configs/dataset_oof_manifest.json",
+    "prepared_oof_manifest_sha256": "a0d349b1c6c911087877f07551a7bc6f31882076b0685f9ca74ade5b77235567"
+  },
+  "result_policy": {
+    "offline_result": "Result 1 is descriptive OOF performance over the identical 348 samples.",
+    "online_result": "Result 2 is the primary feature-selection evidence over the identical balanced 40-scene cohort.",
+    "no_offline_shortlist": true,
+    "no_online_threshold_sweep": true,
+    "feature_selection": "Report all seven features side by side; do not drop a feature before Result 2."
+  }
+}

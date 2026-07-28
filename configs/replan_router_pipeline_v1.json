@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "pipeline_id": "move_playingcard_away_replan_router_v1",
+  "status": "superseded",
+  "superseded_by": "configs/replan_router_feature_selection_v2.json",
+  "task": {
+    "name": "move_playingcard_away",
+    "config": "demo_clean",
+    "horizon": 50,
+    "action_dim": 14,
+    "natural_replan_interval": 25
+  },
+  "dataset": {
+    "data_roots": [
+      "temp/outputs/move_playingcard_away_r25_initial_success_top4_absolute/eval_absolute_path_shard_0",
+      "temp/outputs/move_playingcard_away_r25_initial_success_top4_absolute/eval_absolute_path_shard_1",
+      "../RoboTwin/eval_result/move_playingcard_away/pi05_remote/hr_eval100_pi05_robotwin2_deterministic_seed0_repl01/paired_replan_node_eval_r25_absolute_cadence_round1_round2_union_deterministic"
+    ],
+    "absolute_r0_cadence_required": true,
+    "both_failure_excluded": true,
+    "labels": [
+      "keep_success",
+      "replan_success"
+    ],
+    "label_source": "validated shared-prefix offline counterfactual pairs",
+    "expected_sample_count": 348,
+    "expected_scene_count": 89,
+    "expected_fingerprint": "36331e044e893489234cdff001ce4dd2d8c42ccd6c345bcfb873dabb8635f400"
+  },
+  "split": {
+    "method": "deterministic scene-grouped stratified 70/15/15",
+    "seed": 0,
+    "expected_identity_sha256": "4a9a5037e85a4da87086458db4cd0dde85ae426ebe8b82163d3e5893334e8de4",
+    "expected_counts": {
+      "train": {
+        "samples": 242,
+        "scenes": 62
+      },
+      "val": {
+        "samples": 54,
+        "scenes": 13
+      },
+      "test": {
+        "samples": 52,
+        "scenes": 14
+      }
+    }
+  },
+  "training": {
+    "feature_configs": [
+      "V0",
+      "V1",
+      "V2",
+      "V3",
+      "V4",
+      "V5",
+      "V6",
+      "V7",
+      "E1",
+      "E2"
+    ],
+    "feature_type": "vision_encoder",
+    "vision_encoder_frozen": true,
+    "router": "existing two-logit MLP",
+    "loss": "unweighted BCEWithLogits over keep/replan outcome heads",
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "max_epochs": 200,
+    "early_stopping_patience": 30,
+    "selection": "validation router ROC-AUC, then validation utility",
+    "train_seed": 0,
+    "temporal_k": 5,
+    "eef_waypoints": 5,
+    "gripper_indices": "6,13"
+  },
+  "offline_evaluation": {
+    "headline_split": "test",
+    "threshold": 0.05,
+    "threshold_sweep": [
+      0.05,
+      0.1,
+      0.2,
+      0.3,
+      0.5
+    ],
+    "required_metrics": [
+      "trainable_parameters",
+      "roc_auc",
+      "accuracy",
+      "f1",
+      "strong_replan_recall",
+      "false_trigger_rate",
+      "precision_replan"
+    ],
+    "comparable_test_sample_count": 52,
+    "maximum_trainable_parameters": 1000000,
+    "diagnostic_only_configs": [
+      "V4",
+      "V6",
+      "V7"
+    ],
+    "ranking": [
+      "f1_desc",
+      "false_trigger_rate_asc",
+      "roc_auc_desc",
+      "trainable_parameters_asc"
+    ],
+    "baseline_config": "V0",
+    "challenger_count": 2,
+    "expected_shortlist": [
+      "V0",
+      "E1",
+      "V1"
+    ]
+  },
+  "online_evaluation": {
+    "scene_policy": "expert-valid, absent from discovered prior task manifests and frozen router features at selection time",
+    "scene_count": 20,
+    "candidate_start": 400000,
+    "instruction_type": "unseen",
+    "policy_seed": 0,
+    "query_interval": 5,
+    "query_max_action": 398,
+    "max_replans": 1,
+    "lambda": 0.05,
+    "absolute_r0_cadence": true,
+    "gpus": "0,1,2,3",
+    "port_base": 8400,
+    "planned_arms": 4,
+    "planned_episodes": 80,
+    "required_pair_checks": "all checks emitted by analyze_pair must pass",
+    "promotion_rule": "all 20 pairs valid AND router_successes > control_successes AND rescues > harms",
+    "no_online_threshold_sweep": true
+  },
+  "artifacts": {
+    "reference_offline_root": "temp/outputs/replan_router_feature_ablation",
+    "reference_dataset_manifest_sha256": "78a1b0b5fd2cb66d54b31306df505a22e1a2619495f7456d652f2aa07cdff5ca",
+    "reference_evaluations_sha256": {
+      "V0": "46cb4d3c73ac4f0b381ec2d3466627f10850660b399ce4d2397bee528b6e1071",
+      "V1": "76d34724710963148fbaec9758378da38f8fe4e54202c1686e7df0063804e0bd",
+      "V2": "67a1c3e3164628c58f53ef957ae765850328922d02c2dfacedbfbddaacce2a1a",
+      "V3": "308ad25858b7041473b0bd410c1fcdcce6c538a366779cfea683dedb72ca378f",
+      "V4": "b4264c7aa527e325340655bb8bfeea9ce2b2a6d88f07395436d3e6f6d30147d3",
+      "V5": "0fb0bebabaef7ed7ab402dfeba41832209a4b6b71dd5d0b4add5543072ccb7b4",
+      "V6": "b622b990de4ae30dbc4947fc21f4dde2b5bc3e465086d0ad9c5f7ae4ee9ecbb2",
+      "V7": "2f1b07bd74c6833f6950d12c3f9ffcd82f2222891f5ff194d2d2085c1587f6f2",
+      "E1": "8de9c42148ed864177f302228a9331a8a8e289ac76fc40b40946c0f87105275a",
+      "E2": "46e64bd37fa1f98e596a2622bb5a8fe52959e61c31057862da814b793f6df954"
+    },
+    "reference_checkpoints_sha256": {
+      "V0": "5c2ee63ca392285aac4da8ed5b7e8abeb980ee54ee8f1daaee4b010407e72a9a",
+      "E1": "e63acbd89e2bc89607d0edfe9e07604a4907cd670e7331294c04ad41f915f7bb",
+      "V1": "afa3a3327750c458f22cfcf8dee2792de1ecc9ec5416e1478f98b1566c8c09e0"
+    },
+    "base_feature_archive": "temp/outputs/replan_router_minimal_validation/features_vision_encoder.npz",
+    "base_feature_archive_sha256": "4150b1092f36dff40c6c00c15b2d5f154c1caa009e0d2e1a787ce753fbbef071",
+    "base_feature_manifest": "temp/outputs/replan_router_minimal_validation/features_vision_encoder_manifest.json",
+    "base_feature_manifest_sha256": "2d7bf1488e3a613b7d35d2550a1367aa6c9e44570110ba06724a059e17daa806",
+    "run_root": "temp/outputs/replan_router_pipeline_v1"
+  },
+  "change_control": {
+    "rule": "Any dataset, split, label, feature definition, training protocol, shortlist rule, threshold, or online scene-set change requires a new pipeline_id and a new unseen online scene manifest.",
+    "failure_only_sweeps": "diagnostic only; they cannot estimate false-trigger harm and cannot change this pipeline threshold"
+  }
+}

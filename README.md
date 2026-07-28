@@ -35,6 +35,7 @@ The full rationale and exact commands are in:
 
 - [`docs/PI05_REPLAN_CAUSAL_PIPELINE_HANDOFF.md`](docs/PI05_REPLAN_CAUSAL_PIPELINE_HANDOFF.md)
 - [`docs/PI05_REPLAN_PIPELINE_RUNBOOK.md`](docs/PI05_REPLAN_PIPELINE_RUNBOOK.md)
+- [`docs/ONLINE_REPLAN_ROUTER_HANDOFF.md`](docs/ONLINE_REPLAN_ROUTER_HANDOFF.md)
 
 ## Repository layout
 
@@ -75,6 +76,7 @@ The full rationale and exact commands are in:
 | `run_pi05_paired_replan_node_eval_absolute_cadence.py` | Absolute-cadence shared-control paired-evaluation entry point |
 | `make_pi05_round2_no_rescue_nodes.py` | Optional outcome-adaptive second node round for first-round no-rescue scenes |
 | `merge_pi05_replan_node_manifests.py` | Build an immutable, provenance-preserving union of candidate nodes from multiple rounds |
+| `train_replan_router.py` | Offline frozen-pi0.5 feature extraction and sub-1M-parameter outcome-router training/evaluation |
 | `plot_pi05_scene_outcomes.py` | Render per-scene grid outcomes and the r25-plus-one-replan row |
 | `audit_pi05_replan_pipeline.py` | Read-only end-to-end integrity audit |
 
@@ -165,6 +167,17 @@ RoboTwin `.venv` and OpenPI environment created by their upstream installation
 procedures.
 
 ## Running the pipeline
+
+Replan-router input-feature selection 使用同一个版本化入口：
+
+```bash
+python3 robotwin/script/run_replan_router_feature_selection_pipeline.py \
+  --stage validate
+```
+
+固定的 348-sample scene-grouped OOF、balanced Online-40 和 Result 1/2
+输出协议见
+[replan-router input-feature selection v2](docs/REPLAN_ROUTER_FEATURE_SELECTION_V2.md)。
 
 Use the complete command sequence in the
 [pipeline runbook](docs/PI05_REPLAN_PIPELINE_RUNBOOK.md). The stage order is:
@@ -299,6 +312,103 @@ python3 script/merge_pi05_replan_node_manifests.py \
 
 The merger verifies a single `r0` per scene, deduplicates nodes, records
 per-node source provenance, and refuses to overwrite an incompatible output.
+
+### Offline replan-router feasibility experiment
+
+`train_replan_router.py` does not start RoboTwin, call `sample_actions`, or
+modify the pi0.5 inference pipeline. It reads completed absolute-cadence
+shared-prefix pairs, excludes `keep=0/replan=0` pairs, freezes pi0.5, and
+extracts one of two visual representations:
+
+- `vision_encoder`: masked mean of each camera's projected SigLIP tokens,
+  concatenated in high/left-wrist/right-wrist order;
+- `vlm_hidden`: masked mean of final contextual PaliGemma hidden states at
+  valid language-token positions.
+
+The router has two binary outcome heads:
+
+```text
+p_keep   = P(keep succeeds | zv, za)
+p_replan = P(replan succeeds | zv, za)
+replan iff p_replan - p_keep > lambda
+```
+
+`router_input=vision_action` adds a small MLP encoder for the archived
+`[H, action_dim]` old action chunk. `router_input=vision` is the visual-only
+ablation. Both configurations remain below one million trainable parameters.
+The deterministic 70/15/15 split is grouped by scene seed, so candidate nodes
+from one scene cannot cross splits.
+
+Run from an environment where `python` is the OpenPI interpreter:
+
+```bash
+cd /home/ubuntu/Workspace/Event-triggered-replanning-for-VLA-control/robotwin/script
+
+python train_replan_router.py \
+  --feature_type vision_encoder \
+  --router_input vision_action \
+  --task move_playingcard_away
+```
+
+For another task such as `pick_dual_bottles`, pass its absolute-cadence paired
+roots explicitly when they are not discoverable under the standard result
+locations:
+
+```bash
+python train_replan_router.py \
+  --feature_type vlm_hidden \
+  --router_input vision \
+  --task pick_dual_bottles \
+  --data-root /absolute/path/to/paired_eval
+```
+
+The script writes an immutable feature NPZ and manifest, a router checkpoint,
+and an evaluation JSON. Existing compatible features are reused; router runs
+are never overwritten.
+
+### Offline router feature ablation
+
+The same script also runs the fixed-protocol V0--V7 input ablation while
+reusing the exact dataset fingerprint and scene-grouped split:
+
+```bash
+python train_replan_router.py \
+  --task move_playingcard_away \
+  --feature_config V5
+
+python train_replan_router.py \
+  --task move_playingcard_away \
+  --run_feature_ablation
+```
+
+The configurations add chunk state, the unexecuted action tail, future-action
+statistics, and/or `z_visual(t)-z_visual(t-5)` to the frozen vision feature.
+Temporal configurations strictly skip samples without an archived same-scene
+observation at exactly `t-5`; they retain the original scene assignment and
+record filtered counts per split. The action-tail MLP never sees the executed
+chunk prefix. A separate `C3` diagnostic exposes the legacy full-chunk input
+without adding it to the prescribed V0--V7 summary.
+
+The optional `E1` geometry-aware action diagnostic is also outside V0--V7:
+
+```bash
+python train_replan_router.py \
+  --task move_playingcard_away \
+  --feature_config E1
+```
+
+It differences future qpos targets from the decision observation state,
+integrates the deltas, runs offline FK with RoboTwin's ALOHA URDF, and samples
+five dual-EEF pose waypoints plus their Cartesian/angular/gripper velocity
+profile. The resulting 190-D descriptor is encoded by the same `128 -> 64`
+action MLP. This path uses only an offline fixed-root articulation for FK; it
+starts no RoboTwin task, sends no control action, and changes no online code.
+
+Outputs are isolated under
+`temp/outputs/replan_router_feature_ablation/{configs,checkpoints,evaluations,logs}`.
+Each evaluation contains test metrics and threshold sweeps at
+`0.05, 0.1, 0.2, 0.3, 0.5`; the root also contains
+`evaluation_feature_ablation.json` and `feature_ablation_summary.md`.
 
 ## Read-only acceptance audit
 
