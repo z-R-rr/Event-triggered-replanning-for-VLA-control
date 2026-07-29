@@ -179,6 +179,56 @@ python3 robotwin/script/run_replan_router_feature_selection_pipeline.py \
 输出协议见
 [replan-router input-feature selection v2](docs/REPLAN_ROUTER_FEATURE_SELECTION_V2.md)。
 
+### Cross-task replication: `pick_dual_bottles` / Z2-Cross-v3.1
+
+The current cross-task replication freezes the outcome-router module before
+collecting any new-task data.  It is task-specific training plus task-specific
+unseen-scene evaluation—not joint multi-task training—and uses the same
+counterfactual definition as the causal pipeline:
+
+```text
+beneficial = rescue
+neutral    = both-success + both-failure
+harmful    = harm
+score      = P(beneficial) - P(harmful)
+```
+
+All runs use deterministic policy/inference seed `0`, `H=50`, `r0=25`,
+absolute r0 cadence, a query interval of five completed actions, one maximum
+router trigger, and a 5-fold scene-grouped split with split seed `0`.  The
+coarse training set is 100 task-specific unseen scenes, each paired with a
+single shared r25 control and forced replans at:
+
+```text
+t = 10, 15, 20, 30, 35, 40, 45, 55, 60, 65, 70
+```
+
+Before offline training, the frozen quota gate requires at least 120 rescues
+from 40 failure scenes, 60 harms from 30 success scenes, 200 both-success
+pairs, and 200 both-failure pairs.  A separate task-specific unseen control
+pool is then used to freeze a balanced Online-40 cohort (20 control failures
+and 20 control successes); no training scene may enter that cohort.
+
+The 100 training scenes are immutably sharded into four queues.  A scene's
+control and all eleven forced nodes always remain in the same queue.
+
+| Group | Server GPU | Eval/client GPU | Port | Scenes |
+|---|---:|---:|---:|---:|
+| 0 | 0 | 1 | 8600 | 25 |
+| 1 | 0 | 1 | 8601 | 25 |
+| 2 | 2 | 3 | 8610 | 25 |
+| 3 | 2 | 3 | 8611 | 25 |
+
+Use `select_robotwin_unseen_scenes.py` to materialize the task-specific scene
+and plaintext-prompt manifests, then
+`prepare_pick_dual_bottles_coarse_grid.py` to write the topology and per-group
+node manifests.  `run_pi05_paired_replan_node_eval.py --phase controls` runs
+the shared-control phase without starting forced treatments; after the paired
+smoke gate, resume the same immutable plan with `--phase forced`.  The full
+episode budget, refinement rules, feature/training protocol, and Online-40
+validity checks are in
+[the independent cross-task handoff](docs/PICK_DUAL_BOTTLES_Z2_CROSS_V31_CROSS_TASK_HANDOFF.md).
+
 Use the complete command sequence in the
 [pipeline runbook](docs/PI05_REPLAN_PIPELINE_RUNBOOK.md). The stage order is:
 

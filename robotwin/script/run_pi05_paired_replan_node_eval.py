@@ -579,6 +579,16 @@ def main() -> None:
         help="Write and validate the task-specific plan without launching GPUs.",
     )
     parser.add_argument(
+        "--phase",
+        choices=("all", "controls", "forced"),
+        default="all",
+        help=(
+            "Run the full paired plan, only its shared controls, or only its "
+            "forced treatments.  The latter two modes preserve the same immutable "
+            "plan and support an explicit control -> smoke -> forced workflow."
+        ),
+    )
+    parser.add_argument(
         "--absolute-r0-cadence",
         action="store_true",
         help=(
@@ -602,22 +612,35 @@ def main() -> None:
         print(args.output_dir / "experiment_plan.json")
         return
 
-    cases = plan["controls"] + plan["forced"]
+    cases = (
+        plan["controls"]
+        if args.phase == "controls"
+        else plan["forced"]
+        if args.phase == "forced"
+        else plan["controls"] + plan["forced"]
+    )
     pending = [
         case
         for case in cases
         if not (Path(case["case_dir"]) / "metrics.json").exists()
     ]
     print(
-        f"Planned {len(cases)} trials "
-        f"({len(plan['controls'])} control + {len(plan['forced'])} forced); "
+        f"Phase {args.phase}: selected {len(cases)} trials "
+        f"(full plan: {len(plan['controls'])} control + {len(plan['forced'])} forced); "
         f"pending {len(pending)}",
         flush=True,
     )
     if not pending:
-        summary_path = args.output_dir / "paired_summary.json"
-        write_json(summary_path, final_summary(plan))
-        print(summary_path)
+        progress = progress_report(plan)
+        write_json(args.output_dir / "progress.json", progress)
+        if progress["pending_trials"] == 0:
+            summary_path = args.output_dir / "paired_summary.json"
+            write_json(summary_path, final_summary(plan))
+            print(summary_path)
+        else:
+            phase_path = args.output_dir / f"phase_{args.phase}_complete.json"
+            write_json(phase_path, {"phase": args.phase, **progress})
+            print(phase_path)
         return
 
     logs = args.output_dir / "logs"
@@ -741,9 +764,16 @@ def main() -> None:
         for server_log in server_logs:
             server_log.close()
 
-    summary_path = args.output_dir / "paired_summary.json"
-    write_json(summary_path, final_summary(plan))
-    print(summary_path)
+    progress = progress_report(plan)
+    write_json(args.output_dir / "progress.json", progress)
+    if progress["pending_trials"] == 0:
+        summary_path = args.output_dir / "paired_summary.json"
+        write_json(summary_path, final_summary(plan))
+        print(summary_path)
+    else:
+        phase_path = args.output_dir / f"phase_{args.phase}_complete.json"
+        write_json(phase_path, {"phase": args.phase, **progress})
+        print(phase_path)
 
 
 if __name__ == "__main__":

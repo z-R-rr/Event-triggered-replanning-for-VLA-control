@@ -93,6 +93,12 @@ def existing_task_seeds(task_name: str, excluded_output: Path) -> tuple[set[int]
 
 
 def build_task_args(task_name: str, task_config: str) -> dict:
+    # Match the evaluator launch environment.  Scene selection instantiates
+    # RoboTwin tasks (and therefore the CuRobo planner) even though it does
+    # not run policy inference.
+    curobo_src = ROBOTWIN_ROOT / "envs_invent" / "curobo" / "src"
+    if curobo_src.is_dir():
+        sys.path.insert(0, str(curobo_src))
     sys.path.insert(0, str(ROBOTWIN_ROOT))
     sys.path.insert(0, str(ROBOTWIN_ROOT / "script"))
     from envs import CONFIGS_PATH
