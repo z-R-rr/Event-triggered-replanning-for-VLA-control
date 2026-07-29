@@ -8,5 +8,6 @@ eval_result/
 wandb/
 logs/
 *.log
+temp/
 
 .DS_Store

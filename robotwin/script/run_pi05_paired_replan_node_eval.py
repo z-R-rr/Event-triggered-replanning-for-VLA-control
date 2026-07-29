@@ -18,6 +18,7 @@ mixed into policy RNG entropy.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -25,6 +26,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import threading
 import time
 
 import numpy as np
@@ -63,6 +65,18 @@ def wait_for_port(port: int, server: subprocess.Popen, timeout: int = 180) -> No
                 return
         time.sleep(2)
     raise TimeoutError(f"OpenPI server did not open port {port}")
+
+
+def require_ports_available(ports: list[int]) -> None:
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Port {port} is unavailable; choose another --port range"
+                ) from exc
 
 
 def stop_process_group(process: subprocess.Popen) -> None:
@@ -214,6 +228,28 @@ def final_summary(plan: dict) -> dict:
                     control_trace["instruction"] == forced_trace["instruction"]
                 ),
             }
+            if plan.get("absolute_r0_cadence"):
+                replacement_chunk = (
+                    forced_trace["chunks"][marker_chunk_index + 1]
+                    if marker_chunk_index is not None
+                    and marker_chunk_index + 1 < len(forced_trace["chunks"])
+                    else None
+                )
+                expected_limit = int(plan["r0"]) - node % int(plan["r0"])
+                checks["absolute_r0_cadence_enabled"] = (
+                    replacement_chunk is not None
+                    and replacement_chunk.get("absolute_r0_cadence") is True
+                )
+                checks["replacement_ends_at_next_absolute_boundary"] = (
+                    replacement_chunk is not None
+                    and int(replacement_chunk.get("executed_r", -1))
+                    == expected_limit
+                    and int(
+                        replacement_chunk.get("absolute_r0_next_boundary", -1)
+                    )
+                    == node + expected_limit
+                    and (node + expected_limit) % int(plan["r0"]) == 0
+                )
             control_success = bool(
                 control_trace["episode_metrics"]["episode_success"]
             )
@@ -302,6 +338,7 @@ def final_summary(plan: dict) -> dict:
             "forced_node_trials": len(plan["forced"]),
             "total_trials": len(plan["controls"]) + len(plan["forced"]),
             "server_deterministic_torch": True,
+            "absolute_r0_cadence": bool(plan.get("absolute_r0_cadence", False)),
             "control": "one unmodified r0 trajectory per scene",
             "treatment": "discard old chunk tail after action t and infer before action t+1",
             "validity_gate": (
@@ -392,6 +429,7 @@ def prepare_plan(args: argparse.Namespace) -> dict:
         "r0": args.r0,
         "inference_seed": args.seed,
         "deterministic_torch": True,
+        "absolute_r0_cadence": bool(args.absolute_r0_cadence),
         "source_nodes": str(args.nodes),
         "source_seed_manifest": str(args.seed_manifest),
         "source_resolved_manifest": str(args.resolved_manifest),
@@ -429,7 +467,7 @@ def prepare_plan(args: argparse.Namespace) -> dict:
     return plan
 
 
-def eval_command(args: argparse.Namespace, case: dict) -> list[str]:
+def eval_command(args: argparse.Namespace, case: dict, port: int) -> list[str]:
     case_dir = Path(case["case_dir"])
     forced_actions = (
         [int(case["force_before_one_based_action"])]
@@ -487,7 +525,7 @@ def eval_command(args: argparse.Namespace, case: dict) -> list[str]:
         "--server_host",
         "127.0.0.1",
         "--server_port",
-        str(args.port),
+        str(port),
         "--seed",
         str(args.seed),
         "--instruction_type",
@@ -498,6 +536,8 @@ def eval_command(args: argparse.Namespace, case: dict) -> list[str]:
         "none",
         "--pi05_force_replan_before_actions",
         repr(forced_actions),
+        "--pi05_absolute_r0_cadence",
+        repr(bool(args.absolute_r0_cadence)),
     ]
     return command
 
@@ -518,6 +558,17 @@ def main() -> None:
     parser.add_argument("--server-gpu", default="0")
     parser.add_argument("--client-gpu", default="1")
     parser.add_argument("--port", type=int, default=8100)
+    parser.add_argument(
+        "--parallel-groups",
+        type=int,
+        default=1,
+        help=(
+            "Number of independent server/eval queues to run concurrently. "
+            "All servers use --server-gpu and listen on consecutive ports "
+            "starting at --port. Size this from available server and client "
+            "GPU memory; two groups are the safe starting point on a 24 GiB GPU."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--wandb-mode", choices=("offline", "online", "disabled"), default="disabled"
@@ -527,7 +578,31 @@ def main() -> None:
         action="store_true",
         help="Write and validate the task-specific plan without launching GPUs.",
     )
+    parser.add_argument(
+        "--phase",
+        choices=("all", "controls", "forced"),
+        default="all",
+        help=(
+            "Run the full paired plan, only its shared controls, or only its "
+            "forced treatments.  The latter two modes preserve the same immutable "
+            "plan and support an explicit control -> smoke -> forced workflow."
+        ),
+    )
+    parser.add_argument(
+        "--absolute-r0-cadence",
+        action="store_true",
+        help=(
+            "Insert the forced replan while keeping later natural boundaries "
+            "anchored at r0, 2*r0, ... instead of starting a fresh full-r chunk."
+        ),
+    )
     args = parser.parse_args()
+    if args.parallel_groups < 1:
+        parser.error("--parallel-groups must be at least 1")
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    if args.port + args.parallel_groups - 1 > 65535:
+        parser.error("--port plus --parallel-groups exceeds TCP port 65535")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     plan = prepare_plan(args)
@@ -537,22 +612,35 @@ def main() -> None:
         print(args.output_dir / "experiment_plan.json")
         return
 
-    cases = plan["controls"] + plan["forced"]
+    cases = (
+        plan["controls"]
+        if args.phase == "controls"
+        else plan["forced"]
+        if args.phase == "forced"
+        else plan["controls"] + plan["forced"]
+    )
     pending = [
         case
         for case in cases
         if not (Path(case["case_dir"]) / "metrics.json").exists()
     ]
     print(
-        f"Planned {len(cases)} trials "
-        f"({len(plan['controls'])} control + {len(plan['forced'])} forced); "
+        f"Phase {args.phase}: selected {len(cases)} trials "
+        f"(full plan: {len(plan['controls'])} control + {len(plan['forced'])} forced); "
         f"pending {len(pending)}",
         flush=True,
     )
     if not pending:
-        summary_path = args.output_dir / "paired_summary.json"
-        write_json(summary_path, final_summary(plan))
-        print(summary_path)
+        progress = progress_report(plan)
+        write_json(args.output_dir / "progress.json", progress)
+        if progress["pending_trials"] == 0:
+            summary_path = args.output_dir / "paired_summary.json"
+            write_json(summary_path, final_summary(plan))
+            print(summary_path)
+        else:
+            phase_path = args.output_dir / f"phase_{args.phase}_complete.json"
+            write_json(phase_path, {"phase": args.phase, **progress})
+            print(phase_path)
         return
 
     logs = args.output_dir / "logs"
@@ -563,42 +651,64 @@ def main() -> None:
         "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
         "PYTHONHASHSEED": str(args.seed),
     }
-    server_command = [
-        str(OPENPI_ROOT / ".venv/bin/python"),
-        "scripts/serve_robotwin_policy.py",
-        "--config",
-        args.server_config,
-        "--checkpoint-dir",
-        str(args.checkpoint_dir),
-        "--action-horizon",
-        str(args.horizon),
-        "--port",
-        str(args.port),
-        "--inference-seed",
-        str(args.seed),
-        "--deterministic-torch",
-    ]
-    with (logs / "openpi_server.log").open("a") as server_log:
-        server = subprocess.Popen(
-            server_command,
-            cwd=OPENPI_ROOT,
-            env=server_env,
-            stdout=server_log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        try:
-            wait_for_port(args.port, server)
-            eval_env = os.environ | {
-                "CUDA_VISIBLE_DEVICES": args.client_gpu,
-                "WANDB_MODE": args.wandb_mode,
-                "PYTHONHASHSEED": str(args.seed),
-            }
-            curobo = ROBOTWIN_ROOT / "envs_invent" / "curobo" / "src"
-            eval_env["PYTHONPATH"] = os.pathsep.join(
-                part for part in (str(curobo), eval_env.get("PYTHONPATH", "")) if part
+    group_count = min(args.parallel_groups, len(pending))
+    ports = [args.port + group for group in range(group_count)]
+    require_ports_available(ports)
+    servers: list[subprocess.Popen] = []
+    server_logs = []
+    try:
+        for group, port in enumerate(ports):
+            server_command = [
+                str(OPENPI_ROOT / ".venv/bin/python"),
+                "scripts/serve_robotwin_policy.py",
+                "--config",
+                args.server_config,
+                "--checkpoint-dir",
+                str(args.checkpoint_dir),
+                "--action-horizon",
+                str(args.horizon),
+                "--port",
+                str(port),
+                "--inference-seed",
+                str(args.seed),
+                "--deterministic-torch",
+            ]
+            log_name = (
+                "openpi_server.log"
+                if group_count == 1
+                else f"openpi_server_group_{group:02d}_port_{port}.log"
             )
-            for index, case in enumerate(pending, start=1):
+            server_log = (logs / log_name).open("a")
+            server_logs.append(server_log)
+            servers.append(
+                subprocess.Popen(
+                    server_command,
+                    cwd=OPENPI_ROOT,
+                    env=server_env,
+                    stdout=server_log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            )
+        for port, server in zip(ports, servers, strict=True):
+            wait_for_port(port, server)
+
+        eval_env = os.environ | {
+            "CUDA_VISIBLE_DEVICES": args.client_gpu,
+            "WANDB_MODE": args.wandb_mode,
+            "PYTHONHASHSEED": str(args.seed),
+        }
+        curobo = ROBOTWIN_ROOT / "envs_invent" / "curobo" / "src"
+        eval_env["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(curobo), eval_env.get("PYTHONPATH", "")) if part
+        )
+        progress_lock = threading.Lock()
+        stop_event = threading.Event()
+
+        def run_group(group: int, port: int, group_cases: list[tuple[int, dict]]) -> None:
+            for index, case in group_cases:
+                if stop_event.is_set():
+                    return
                 case_dir = Path(case["case_dir"])
                 suffix = (
                     f"after={case['replan_after_actions']}"
@@ -606,27 +716,64 @@ def main() -> None:
                     else "shared-control"
                 )
                 print(
-                    f"[{index}/{len(pending)}] {case['arm']} "
+                    f"[{index}/{len(pending)} group={group} port={port}] {case['arm']} "
                     f"scene={case['scene_seed']} {suffix}",
                     flush=True,
                 )
                 with (case_dir / "eval.log").open("w") as eval_log:
                     result = subprocess.run(
-                        eval_command(args, case),
+                        eval_command(args, case, port),
                         cwd=ROBOTWIN_ROOT,
                         env=eval_env,
                         stdout=eval_log,
                         stderr=subprocess.STDOUT,
                     )
                 if result.returncode != 0:
+                    stop_event.set()
                     raise RuntimeError(f"Evaluation failed; see {case_dir / 'eval.log'}")
-                write_json(args.output_dir / "progress.json", progress_report(plan))
-        finally:
-            stop_process_group(server)
+                with progress_lock:
+                    write_json(
+                        args.output_dir / "progress.json", progress_report(plan)
+                    )
 
-    summary_path = args.output_dir / "paired_summary.json"
-    write_json(summary_path, final_summary(plan))
-    print(summary_path)
+        indexed_pending = list(enumerate(pending, start=1))
+        queues = [indexed_pending[group::group_count] for group in range(group_count)]
+        print(
+            f"Running {group_count} independent server/eval groups on server GPU "
+            f"{args.server_gpu}, ports {ports}",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=group_count) as executor:
+            futures = [
+                executor.submit(run_group, group, port, group_cases)
+                for group, (port, group_cases) in enumerate(
+                    zip(ports, queues, strict=True)
+                )
+            ]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception:
+                    stop_event.set()
+                    for other in futures:
+                        other.cancel()
+                    raise
+    finally:
+        for server in servers:
+            stop_process_group(server)
+        for server_log in server_logs:
+            server_log.close()
+
+    progress = progress_report(plan)
+    write_json(args.output_dir / "progress.json", progress)
+    if progress["pending_trials"] == 0:
+        summary_path = args.output_dir / "paired_summary.json"
+        write_json(summary_path, final_summary(plan))
+        print(summary_path)
+    else:
+        phase_path = args.output_dir / f"phase_{args.phase}_complete.json"
+        write_json(phase_path, {"phase": args.phase, **progress})
+        print(phase_path)
 
 
 if __name__ == "__main__":

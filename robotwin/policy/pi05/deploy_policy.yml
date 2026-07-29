@@ -15,3 +15,4 @@ pi05_dynamic_r: false
 pi05_dynamic_r_candidates: []
 pi05_dynamic_r_calibration: null
 pi05_dynamic_r_threshold: 0.75
+pi05_absolute_r0_cadence: false

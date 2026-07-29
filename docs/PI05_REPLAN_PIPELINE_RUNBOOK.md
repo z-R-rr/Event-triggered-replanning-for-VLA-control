@@ -8,7 +8,7 @@ rationale and known failure modes remain in
 
 | Item | Value |
 |---|---|
-| Checkpoint | `/home/ubuntu/Model/pi0.5_robotwin2` |
+| Checkpoint | [`motus-robotics/pi0.5_robotwin2`](https://huggingface.co/motus-robotics/pi0.5_robotwin2), installed at `/home/ubuntu/Model/pi0.5_robotwin2` |
 | OpenPI config | `pi05_robotwin2_multitask_pytorch` |
 | Task config | `demo_clean` |
 | Predicted horizon | `H=50` |

@@ -16,10 +16,37 @@ import numpy as np
 from openpi_client import websocket_client_policy
 
 
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+        raise ValueError(f"Unsupported boolean value: {value!r}")
+    return bool(value)
+
+
 class RemotePiPolicy:
-    def __init__(self, host: str, port: int, pi0_step: int, intervention: str = "none", pause_steps: int = 0, force_replan_before_actions=None,
-                 dynamic_r: bool = False, dynamic_r_candidates=None, dynamic_r_calibration: str | None = None,
-                 dynamic_r_threshold: float = 0.75):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        pi0_step: int,
+        intervention: str = "none",
+        pause_steps: int = 0,
+        force_replan_before_actions=None,
+        dynamic_r: bool = False,
+        dynamic_r_candidates=None,
+        dynamic_r_calibration: str | None = None,
+        dynamic_r_threshold: float = 0.75,
+        absolute_r0_cadence: bool = False,
+        router_enabled: bool = False,
+        router_nodes_manifest: str | None = None,
+        router_lambda: float = 0.05,
+        router_max_replans: int = 1,
+        router_min_replan_interval: int = 0,
+    ):
         self.client = websocket_client_policy.WebsocketClientPolicy(host=host, port=port)
         self.pi0_step = pi0_step
         self.instruction = None
@@ -44,6 +71,10 @@ class RemotePiPolicy:
         # It is never enabled in ordinary evaluations.
         self.force_replan_before_actions = {int(value) for value in (force_replan_before_actions or [])}
         self._forced_replan_before_actions_seen = set()
+        # Default False preserves the validated behavior in which a forced
+        # replan starts a fresh full-r chunk. True inserts one forced replan
+        # while keeping later natural boundaries anchored at r0, 2*r0, ...
+        self.absolute_r0_cadence = _as_bool(absolute_r0_cadence)
         self.dynamic_r = bool(dynamic_r)
         self.dynamic_r_candidates = sorted({int(value) for value in (dynamic_r_candidates or [pi0_step])})
         if self.pi0_step not in self.dynamic_r_candidates:
@@ -55,16 +86,45 @@ class RemotePiPolicy:
             self.dynamic_r_calibration = json.loads(open(dynamic_r_calibration).read())
         if self.dynamic_r and self.dynamic_r_calibration is None:
             raise ValueError("pi05_dynamic_r requires pi05_dynamic_r_calibration")
+        self.router_enabled = _as_bool(router_enabled)
+        self.router_lambda = float(router_lambda)
+        self.router_max_replans = int(router_max_replans)
+        self.router_min_replan_interval = int(router_min_replan_interval)
+        if not 0.0 < self.router_lambda < 1.0:
+            raise ValueError("pi05_router_lambda must be strictly between 0 and 1")
+        if self.router_max_replans < 1:
+            raise ValueError("pi05_router_max_replans must be positive")
+        if self.router_min_replan_interval < 0:
+            raise ValueError(
+                "pi05_router_min_replan_interval must be non-negative"
+            )
+        self.router_nodes_by_seed = {}
+        if router_nodes_manifest:
+            manifest = json.loads(Path(router_nodes_manifest).read_text())
+            self.router_nodes_by_seed = {
+                int(row["scene_seed"]): {
+                    int(node) for node in row["candidate_nodes"]
+                }
+                for row in manifest["scenes"]
+            }
+        if self.router_enabled and not self.router_nodes_by_seed:
+            raise ValueError(
+                "pi05_router_enabled requires pi05_router_nodes_manifest"
+            )
+        self.router_candidate_nodes = set()
+        self.router_replans = 0
+        self.router_last_replan_action = None
+        self.router_queries = []
 
     def set_language(self, instruction: str) -> None:
         self.instruction = instruction
 
-    def _request_actions(self, observation: dict, *, shadow_probe_id: int | None = None) -> np.ndarray:
+    def _request_payload(self, observation: dict) -> dict:
         if self.instruction is None:
             raise RuntimeError("Language instruction has not been set.")
         images = observation["observation"]
         state = observation["joint_action"]["vector"]
-        request = {
+        return {
             "state": np.asarray(state, dtype=np.float32),
             "images": {
                 "cam_high": np.ascontiguousarray(np.transpose(images["head_camera"]["rgb"], (2, 0, 1))),
@@ -73,6 +133,9 @@ class RemotePiPolicy:
             },
             "prompt": self.instruction,
         }
+
+    def _request_actions(self, observation: dict, *, shadow_probe_id: int | None = None) -> np.ndarray:
+        request = self._request_payload(observation)
         if self.episode_seed is not None:
             request["episode_seed"] = self.episode_seed
         if self.episode_id is not None:
@@ -80,6 +143,37 @@ class RemotePiPolicy:
         if shadow_probe_id is not None:
             request["shadow_probe_id"] = int(shadow_probe_id)
         return self.client.infer(request)["actions"]
+
+    def score_router(
+        self,
+        observation: dict,
+        old_action_chunk: np.ndarray,
+        old_chunk_cursor: int,
+        completed_actions: int,
+    ) -> dict:
+        """Query the frozen router without sampling actions or advancing VLA RNG."""
+        request = self._request_payload(observation)
+        request.update(
+            {
+                "router_query": True,
+                "old_action_chunk": np.asarray(
+                    old_action_chunk, dtype=np.float32
+                ),
+                "old_chunk_cursor": int(old_chunk_cursor),
+                "completed_actions": int(completed_actions),
+                "router_lambda": self.router_lambda,
+                "natural_replan_interval": int(self.initial_pi0_step),
+                "last_replan_action": self.router_last_replan_action,
+            }
+        )
+        if self.episode_seed is not None:
+            request["episode_seed"] = self.episode_seed
+        if self.episode_id is not None:
+            request["episode_id"] = self.episode_id
+        result = self.client.infer(request)["router"]
+        if int(result["completed_actions"]) != int(completed_actions):
+            raise RuntimeError("Router response action clock mismatch")
+        return result
 
     def infer(self, observation: dict) -> np.ndarray:
         if self.first_inference_start is None:
@@ -104,6 +198,10 @@ class RemotePiPolicy:
         self.episode_id = None
         self.csl_probe_counter = 0
         self._forced_replan_before_actions_seen = set()
+        self.router_candidate_nodes = set()
+        self.router_replans = 0
+        self.router_last_replan_action = None
+        self.router_queries = []
         # pi0_step intentionally resets to the configured initial candidate;
         # it may have changed during the preceding episode.
         self.pi0_step = self.initial_pi0_step
@@ -114,6 +212,13 @@ class RemotePiPolicy:
 
     def set_episode_seed(self, seed: int) -> None:
         self.episode_seed = int(seed)
+        self.router_candidate_nodes = set(
+            self.router_nodes_by_seed.get(self.episode_seed, set())
+        )
+        if self.router_enabled and not self.router_candidate_nodes:
+            raise ValueError(
+                f"No router candidate nodes for scene seed {self.episode_seed}"
+            )
 
     def set_episode_id(self, episode_id: int) -> None:
         """Set an occurrence token; it resets server call indexing, not RNG entropy."""
@@ -144,6 +249,14 @@ def get_model(usr_args):
         dynamic_r_candidates=usr_args.get("pi05_dynamic_r_candidates", []),
         dynamic_r_calibration=usr_args.get("pi05_dynamic_r_calibration"),
         dynamic_r_threshold=float(usr_args.get("pi05_dynamic_r_threshold", 0.75)),
+        absolute_r0_cadence=usr_args.get("pi05_absolute_r0_cadence", False),
+        router_enabled=usr_args.get("pi05_router_enabled", False),
+        router_nodes_manifest=usr_args.get("pi05_router_nodes_manifest"),
+        router_lambda=float(usr_args.get("pi05_router_lambda", 0.05)),
+        router_max_replans=int(usr_args.get("pi05_router_max_replans", 1)),
+        router_min_replan_interval=int(
+            usr_args.get("pi05_router_min_replan_interval", 0)
+        ),
     )
     model.initial_pi0_step = model.pi0_step
     return model
@@ -151,6 +264,17 @@ def get_model(usr_args):
 
 def _phase(task_env):
     return task_env.get_policy_phase() if hasattr(task_env, "get_policy_phase") else "unknown"
+
+
+def _execution_limit(model, completed_actions: int) -> int:
+    """Actions to execute before the next natural absolute-r0 boundary."""
+    if not model.absolute_r0_cadence:
+        return int(model.pi0_step)
+    if model.dynamic_r:
+        raise ValueError("absolute r0 cadence is incompatible with dynamic r")
+    cadence_r = int(model.initial_pi0_step)
+    offset = int(completed_actions) % cadence_r
+    return cadence_r if offset == 0 else cadence_r - offset
 
 
 def _observation_fingerprint(observation):
@@ -436,6 +560,7 @@ def eval(task_env, model, observation):
         if boundary_probe is not None:
             model.chunk_traces[-1]["csl_probes"].append(boundary_probe)
     dynamic_r_decision = _dynamic_r_decision(model) if model.dynamic_r else None
+    execution_limit = _execution_limit(model, task_env.take_action_cnt)
     if getattr(model, "trace_enabled", False):
         model.chunk_traces.append({
             "inference_call": model.inference_calls,
@@ -448,17 +573,24 @@ def eval(task_env, model, observation):
             "previous_chunk_cursor": int(model.previous_chunk_cursor),
             "consistency": consistency,
             "csl_probes": [],
+            "router_queries": [],
             # Filled after the first action: measured Cartesian continuity at
             # the old/new chunk boundary. It is safe because it reads only
             # current end-effector poses, unlike speculative FK mutation.
             "boundary_cartesian_delta": None,
             "chunk_actions": actions.tolist(),
             "dynamic_r_decision": dynamic_r_decision,
-            "executed_r": int(model.pi0_step),
+            "executed_r": execution_limit,
+            "absolute_r0_cadence": bool(model.absolute_r0_cadence),
+            "absolute_r0_next_boundary": (
+                int(task_env.take_action_cnt) + execution_limit
+                if model.absolute_r0_cadence
+                else None
+            ),
         })
     model.previous_chunk = actions.copy()
     model.previous_chunk_cursor = 0
-    for action_index, action in enumerate(actions[: model.pi0_step]):
+    for action_index, action in enumerate(actions[:execution_limit]):
         next_global_action = int(task_env.take_action_cnt) + 1
         if (
             next_global_action in model.force_replan_before_actions
@@ -508,6 +640,42 @@ def eval(task_env, model, observation):
             )
             if probe is not None:
                 model.chunk_traces[-1]["csl_probes"].append(probe)
+        router_decision = None
+        completed_actions = int(task_env.take_action_cnt)
+        if (
+            model.router_enabled
+            and model.router_replans < model.router_max_replans
+            and (
+                model.router_last_replan_action is None
+                or completed_actions - model.router_last_replan_action
+                >= model.router_min_replan_interval
+            )
+            and completed_actions in model.router_candidate_nodes
+            and not task_env.eval_success
+            and completed_actions < task_env.step_lim
+        ):
+            router_observation = task_env.get_obs()
+            router_decision = model.score_router(
+                router_observation,
+                actions,
+                model.previous_chunk_cursor,
+                completed_actions,
+            )
+            router_decision = {
+                **router_decision,
+                "observation_fingerprint": _observation_fingerprint(
+                    router_observation
+                ),
+                "trigger_before_one_based_action": completed_actions + 1,
+                "replans_before_query": model.router_replans,
+                "last_replan_action": model.router_last_replan_action,
+                "min_replan_interval": model.router_min_replan_interval,
+            }
+            model.router_queries.append(router_decision)
+            if getattr(model, "trace_enabled", False):
+                model.chunk_traces[-1]["router_queries"].append(
+                    router_decision
+                )
         if getattr(model, "trace_enabled", False):
             model.action_traces.append({
                 "inference_call": model.inference_calls,
@@ -522,6 +690,7 @@ def eval(task_env, model, observation):
                 "phase_changed": phase_changed,
                 "gripper_contact_after_action": _gripper_contact_summary(task_env),
                 "observation_record_path_after_action": recorded_action_observation,
+                "router_query": router_decision,
                 **execution,
             })
             if action_index == 0:
@@ -539,6 +708,13 @@ def eval(task_env, model, observation):
         topp_failed = not execution.get("topp_left_success", True) or not execution.get("topp_right_success", True)
         if model.intervention == "replan_on_topp_failure" and topp_failed:
             should_replan = True
+        router_triggered = bool(
+            router_decision is not None and router_decision["trigger"]
+        )
+        if router_triggered:
+            should_replan = True
+            model.router_replans += 1
+            model.router_last_replan_action = completed_actions
         if should_replan:
             pause_steps = model.pause_steps if model.intervention == "pause_then_clear_after_first_place" else 0
             if pause_steps:
@@ -548,6 +724,14 @@ def eval(task_env, model, observation):
                 model.action_traces[-1]["pause_scene_steps"] = pause_steps
                 if model.intervention == "replan_on_topp_failure" and topp_failed:
                     model.action_traces[-1]["forced_replan_reason"] = "topp_failure"
+                if router_triggered:
+                    model.action_traces[-1]["forced_replan_reason"] = "router"
+                    model.action_traces[-1][
+                        "router_trigger_before_one_based_action"
+                    ] = completed_actions + 1
+                    model.chunk_traces[-1].setdefault(
+                        "router_trigger_before_actions", []
+                    ).append(completed_actions + 1)
             return
         if task_env.eval_success or task_env.take_action_cnt >= task_env.step_lim:
             break

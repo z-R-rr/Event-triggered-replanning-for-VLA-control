@@ -1,0 +1,84 @@
+{
+  "schema_version": 3,
+  "pipeline_id": "move_playingcard_away_z1_feature_evaluation_v3",
+  "status": "active_extension",
+  "inherits_protocol": "configs/replan_router_feature_selection_v2.json",
+  "feature": {
+    "name": "Z1",
+    "modules": [
+      "vision",
+      "action_expert_hidden_tail"
+    ],
+    "definition": {
+      "model_component": "frozen pi0.5 Gemma action expert",
+      "layer": "final transformer layer after final RMS normalization",
+      "flow_time_tau": 0.0,
+      "action_input": "current old_action_chunk transformed into pi0.5 model action space using the current observation state",
+      "token_range": "[old_chunk_cursor:H)",
+      "pooling": "mean over remaining action-token hidden states",
+      "raw_hidden_dimension": 2048,
+      "router_encoding": "train-standardized h_t -> Linear(2048,64) -> GELU",
+      "online_action_sampling": false
+    },
+    "expected_router_parameters": 926146
+  },
+  "task": {
+    "name": "move_playingcard_away",
+    "config": "demo_clean",
+    "horizon": 50,
+    "action_dim": 14,
+    "natural_replan_interval": 25
+  },
+  "offline": {
+    "data_roots": [
+      "temp/outputs/move_playingcard_away_r25_initial_success_top4_absolute/eval_absolute_path_shard_0",
+      "temp/outputs/move_playingcard_away_r25_initial_success_top4_absolute/eval_absolute_path_shard_1",
+      "../RoboTwin/eval_result/move_playingcard_away/pi05_remote/hr_eval100_pi05_robotwin2_deterministic_seed0_repl01/paired_replan_node_eval_r25_absolute_cadence_round1_round2_union_deterministic"
+    ],
+    "dataset_fingerprint": "36331e044e893489234cdff001ce4dd2d8c42ccd6c345bcfb873dabb8635f400",
+    "scene_count": 89,
+    "sample_count": 348,
+    "transition_counts": {
+      "rescue": 56,
+      "harm": 16,
+      "both_success": 276
+    },
+    "oof_folds": 5,
+    "fold_identity_sha256": "070082affc633d3776a2ff2bb0bcfb9bf9fad3851f395ad6e541799ac0b1e226",
+    "split_seed": 0,
+    "train_seed": 0,
+    "batch_size": 32,
+    "max_epochs": 200,
+    "patience": 30,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "lambda": 0.05
+  },
+  "online": {
+    "scene_count": 40,
+    "confirmed_control_failure_count": 20,
+    "confirmed_control_success_count": 20,
+    "cohort_identity_sha256": "04e17993cd91581c328c70a4fd27e14a7f0c1e6ea22e6330a3420f3e17dd6cab",
+    "seed_manifest": "temp/outputs/replan_router_feature_selection_v2/online/inputs/balanced_seed_manifest.json",
+    "seed_manifest_sha256": "63f919e426a1aa4900800ab932ada05c44c05e95046c60ec914cd3c773167d7f",
+    "resolved_manifest": "temp/outputs/replan_router_feature_selection_v2/online/inputs/balanced_resolved_episode_manifest.json",
+    "resolved_manifest_sha256": "2151ae5c73efdbfb1ed590bf08ed2ded75d77668645012948c2fac4bdcf3c90b",
+    "query_interval": 5,
+    "query_max_action": 398,
+    "max_replans": 1,
+    "lambda": 0.05,
+    "policy_seed": 0,
+    "gpus": "0,1",
+    "port_base": 8400,
+    "planned_episodes": 80
+  },
+  "artifacts": {
+    "output_root": "temp/outputs/replan_router_z1_evaluation_v3",
+    "base_visual_archive": "temp/outputs/replan_router_minimal_validation/features_vision_encoder.npz",
+    "base_visual_archive_sha256": "4150b1092f36dff40c6c00c15b2d5f154c1caa009e0d2e1a787ce753fbbef071",
+    "base_visual_manifest": "temp/outputs/replan_router_minimal_validation/features_vision_encoder_manifest.json",
+    "base_visual_manifest_sha256": "2d7bf1488e3a613b7d35d2550a1367aa6c9e44570110ba06724a059e17daa806",
+    "pi05_checkpoint": "/home/ubuntu/Model/pi0.5_robotwin2",
+    "server_config": "pi05_robotwin2_multitask_pytorch"
+  }
+}
